@@ -17,6 +17,7 @@ filepaths relative to <source_repo>).
 
 Options:
   --branch=<branch>    Branch to process on the source [default: master]
+  --as-root           Make <filter> the root of the target repo
   --only-specs         Only print git filter-repo specs file as expected by git filter-repo --paths-from-file
   -h --help            show this help message and exit
   -f --force           remove <target_repo> if exists
@@ -39,7 +40,7 @@ logging.basicConfig(format=log_format, level=logging.DEBUG)
 logger = logging.root
 
 
-def build_git_filter_path_spec(git_repo: pathlib.Path, filter: str, glob_filter_list: bool = False) -> typing.List[str]:
+def build_git_filter_path_spec(git_repo: pathlib.Path, filter: str, glob_filter_list: bool = False, asroot: bool = False) -> typing.List[str]:
 
     init_files_list = []
     if not pathlib.Path(filter).exists():
@@ -55,7 +56,8 @@ def build_git_filter_path_spec(git_repo: pathlib.Path, filter: str, glob_filter_
             raise SystemExit(-1)
         logger.debug(f"Globbing files in {git_repo_subdir}")
         init_files_list = list(git_repo_subdir.rglob('*'))
-    else:
+
+    elif not asroot:
         logger.debug(f"Filter is a file, assuming it contains paths relative to {git_repo}")
         filter_file = pathlib.Path(filter)
         with open(filter_file) as infile:
@@ -71,6 +73,9 @@ def build_git_filter_path_spec(git_repo: pathlib.Path, filter: str, glob_filter_
                     filter_str = infile.readline().strip()
 
                 init_files_list = list(paths)
+    else: 
+        logger.critical(f"Can only make filter the root of the target repo if it is a directory.")
+        raise SystemExit(-1)
 
     if len(init_files_list) == 0:
         logger.critical(f"Filter {filter} did not match any files")
@@ -121,6 +126,11 @@ def build_git_filter_path_spec(git_repo: pathlib.Path, filter: str, glob_filter_
     if logger.isEnabledFor(logging.DEBUG):
         all_rename_statements_newlines = '\n\t'.join(all_rename_statements)
         logger.debug(f"All renames:\n\t{all_rename_statements_newlines}")
+    
+    # since --path-rename will make the filter the root of the target repo, we need to remove the filter from the paths
+    if asroot:
+        init_files_list =  [(git_repo/file.relative_to(git_repo_subdir)) for file in init_files_list]
+        
     return all_filter_paths, init_files_list
 
 
@@ -165,6 +175,10 @@ def main():
             logger.critical(f"Target directory {target_repo} already exists. Use --force to override")
             raise SystemExit(-1)
 
+    asroot = arguments["--as-root"]
+    if asroot:
+        logger.info(f"{filter} will become the root of the target {target_repo}")
+
     # logger.info(f"Will convert repo at {source_repo / subdir} into {target_repo} preserving file history")
 
     with tempfile.TemporaryDirectory() as str_workdir:
@@ -183,7 +197,7 @@ def main():
         logger.debug(f"Calling {' '.join(workclone_cmd)}")
         subprocess.check_call(workclone_cmd)
 
-        filenameset, init_files_list = build_git_filter_path_spec(workclone, filter, glob_filter_file)
+        filenameset, init_files_list = build_git_filter_path_spec(workclone, filter, glob_filter_file, asroot)
         filter_repo_paths_file = workdir / "filter_path_specs.txt"
         with open(filter_repo_paths_file, "w") as outfile:
             for line in filenameset:
@@ -204,20 +218,24 @@ def main():
                        "--paths-from-file",
                        str(filter_repo_paths_file)
                        ]
+        # If --as-root is specified, we need to move the files to the root of the repo
+        if asroot:
+            filter_args.extend(["--path-rename", f"{filter}/:"])
         logger.debug(f"Calling {' '.join(filter_args)}")
         subprocess.check_call(filter_args,
                               universal_newlines=True)
-
-        wipe_all_args = ["git",
-                         "-C",
-                         str(workclone),
-                         "rm",
-                         "-rf",
-                         "."
-                         ]
-        logger.debug(f"Calling {' '.join(wipe_all_args)}")
-        subprocess.check_call(wipe_all_args,
-                              universal_newlines=True)
+        
+        if not asroot:
+            wipe_all_args = ["git",
+                            "-C",
+                            str(workclone),
+                            "rm",
+                            "-rf",
+                            "."
+                            ]
+            logger.debug(f"Calling {' '.join(wipe_all_args)}")
+            subprocess.check_call(wipe_all_args,
+                                universal_newlines=True)
 
         # Iterate over the files in the init_files_list and restore them
         # This is inefficient if a subdirectory is specified, but this way
